@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.61.0](https://github.com/PostHog/wizard/compare/v2.60.0...v2.61.0) (2026-08-10)
+
+
+### Features
+
+* **self-driving:** fix the onboarding papercuts a customer run surfaced ([#1057](https://github.com/PostHog/wizard/issues/1057)) ([cf768c8](https://github.com/PostHog/wizard/commit/cf768c836340a592ecbbd6263fdc10a46197171c))
+
+
+### Bug Fixes
+
+* **tui:** guard Tumblers pin geometry and re-enable Visualizer tab ([#890](https://github.com/PostHog/wizard/issues/890)) ([74edd5f](https://github.com/PostHog/wizard/commit/74edd5f4ae86b41a97541a61cc058b6a53a34730))
+
 ## [2.60.0](https://github.com/PostHog/wizard/compare/v2.59.0...v2.60.0) (2026-08-06)
 
 
