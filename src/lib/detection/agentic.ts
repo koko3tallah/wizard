@@ -24,6 +24,7 @@ import { getSkillsBaseUrl, HAIKU_MODEL } from '@lib/constants';
 import type { WizardSession } from '@lib/wizard-session';
 import type { WizardRunOptions } from '@utils/types';
 import type { SpinnerHandle } from '@ui';
+import { analytics } from '@utils/analytics';
 
 /** A category the agent classifies each project into (id the agent returns). */
 export type DetectTarget = { id: string; name: string };
@@ -40,6 +41,12 @@ export type AgenticProject = {
   hasPostHog: boolean;
   /** True on the one project picked as the main user-facing app; only present when the scan set `recommend`. */
   recommended?: boolean;
+  /** The agent's enumeration of matching target ids as emitted — unvalidated, clamped (telemetry). */
+  matchingTargets?: string[];
+  /** The manifest fact the agent cited for its verdict, clamped (telemetry). */
+  evidence?: string;
+  /** How targetId was decided: the agent's own pick, the enumeration fallback, a rerank override, or nothing matched (telemetry). */
+  targetSource?: 'pick' | 'enumeration' | 'rerank' | 'none';
 };
 
 export type AgenticDetectionReport = {
@@ -255,11 +262,11 @@ export function coerceAgenticReport(
       typeof p.targetId === 'string' && validTargetIds.includes(p.targetId)
         ? p.targetId
         : null;
-    const enumerated = Array.isArray(p.matchingTargets)
-      ? validTargetIds.find((id) =>
-          (p.matchingTargets as unknown[]).includes(id),
-        ) ?? null
-      : null;
+    const rawMatching = Array.isArray(p.matchingTargets)
+      ? (p.matchingTargets as unknown[])
+      : [];
+    const enumerated =
+      validTargetIds.find((id) => rawMatching.includes(id)) ?? null;
     const targetId =
       pick === null
         ? enumerated
@@ -275,6 +282,23 @@ export function coerceAgenticReport(
       framework: typeof p.framework === 'string' ? p.framework : 'Unknown',
       targetId,
       hasPostHog: p.hasPostHog === true,
+      // Telemetry (`wizard: agentic detection report`): the agent's raw
+      // enumeration and cited evidence, clamped — both are LLM output — plus
+      // which mechanism above produced targetId.
+      matchingTargets: rawMatching
+        .filter((t): t is string => typeof t === 'string')
+        .slice(0, 20)
+        .map((t) => t.slice(0, 100)),
+      evidence:
+        typeof p.evidence === 'string' ? p.evidence.slice(0, 200) : undefined,
+      targetSource:
+        targetId === null
+          ? 'none'
+          : pick === null
+          ? 'enumeration'
+          : targetId === pick
+          ? 'pick'
+          : 'rerank',
       ...(recommend ? { recommended } : {}),
     };
   });
@@ -314,6 +338,30 @@ const NOOP_SPINNER: SpinnerHandle = {
   message: () => undefined,
 };
 
+/** The report event carries at most this many projects; project_count is the true total. */
+const MAX_PROJECTS_CAPTURED = 25;
+
+/**
+ * One `wizard: agentic detection report` event per scan that reaches the
+ * agent (thrown initialization failures skip it) — the raw material for
+ * grooming classification quality in the wild. `purpose` discriminates the
+ * calling flow; on success the projects carry the agent's enumeration,
+ * evidence and how each targetId was decided.
+ */
+function captureDetectionReport(
+  purpose: string,
+  startedAt: number,
+  outcome: 'success' | 'no-manifests' | 'no-report' | 'error',
+  properties: Record<string, unknown> = {},
+): void {
+  analytics.wizardCapture('agentic detection report', {
+    purpose,
+    outcome,
+    duration_ms: Date.now() - startedAt,
+    ...properties,
+  });
+}
+
 /**
  * Drive the wizard's agent loop on HAIKU_MODEL to scan the repo and return a
  * structured detection report. Reuses the same setup every program uses, so
@@ -336,6 +384,7 @@ export async function detectProjectsWithAgent(
   const { accessToken, host } = session.credentials;
   const cwd = session.installDir;
   const runOptions = sessionToWizardOptions(session);
+  const startedAt = Date.now();
 
   const agent = await initializeAgent(
     {
@@ -406,7 +455,11 @@ export async function detectProjectsWithAgent(
   );
 
   if (result.error) {
-    throw new Error(result.message || `Agent error: ${result.error}`);
+    const message = result.message || `Agent error: ${result.error}`;
+    captureDetectionReport(purpose, startedAt, 'error', {
+      error_message: message,
+    });
+    throw new Error(message);
   }
 
   // Transcript first, final message last — its verdicts win path conflicts.
@@ -419,13 +472,35 @@ export async function detectProjectsWithAgent(
     // report so the screen renders a friendly "nothing to instrument" state
     // instead of a cryptic "Agent did not return a JSON object" error.
     if (output.includes(AgentSignals.ABORT)) {
+      captureDetectionReport(purpose, startedAt, 'no-manifests');
       return { repoType: 'single', projects: [] };
     }
+    captureDetectionReport(purpose, startedAt, 'no-report');
     throw new Error('Agent did not return a JSON object');
   }
-  return coerceAgenticReport(
+  const report = coerceAgenticReport(
     derived,
     targets.map((t) => t.id),
     { recommend, rerankIds },
   );
+  // Whether the final message alone would have lost projects and the
+  // transcript's verdict lines rescued them — how often the model's final
+  // assembly still degrades in the wild.
+  const fromFinal = deriveReportJson(resultText) as {
+    projects: unknown[];
+  } | null;
+  captureDetectionReport(purpose, startedAt, 'success', {
+    repo_type: report.repoType,
+    project_count: report.projects.length,
+    supported_count: report.projects.filter((p) => p.targetId != null).length,
+    rerank_count: report.projects.filter((p) => p.targetSource === 'rerank')
+      .length,
+    fallback_count: report.projects.filter(
+      (p) => p.targetSource === 'enumeration',
+    ).length,
+    assembly_degraded:
+      (fromFinal?.projects.length ?? 0) < report.projects.length,
+    projects: report.projects.slice(0, MAX_PROJECTS_CAPTURED),
+  });
+  return report;
 }

@@ -207,6 +207,49 @@ describe('coerceAgenticReport matchingTargets', () => {
     ).toBe('vite');
     expect(project({ matchingTargets: ['rocket'] }).targetId).toBeNull();
   });
+
+  it('records the enumeration, evidence and decision mechanism for telemetry', () => {
+    const p = project(
+      {
+        matchingTargets: ['vite', 'node'],
+        targetId: 'vite',
+        evidence: 'vite in devDependencies of package.json',
+      },
+      ['node', 'vite'],
+    );
+    expect(p.targetSource).toBe('rerank');
+    expect(p.matchingTargets).toEqual(['vite', 'node']);
+    expect(p.evidence).toBe('vite in devDependencies of package.json');
+  });
+
+  it('targetSource distinguishes pick, fallback and none', () => {
+    expect(
+      project({ matchingTargets: ['vite'], targetId: 'vite' }).targetSource,
+    ).toBe('pick');
+    expect(
+      project({ matchingTargets: ['vite'], targetId: 'rocket' }).targetSource,
+    ).toBe('enumeration');
+    expect(project({ matchingTargets: ['rocket'] }).targetSource).toBe('none');
+    // A rerank that agrees with the pick is still the pick.
+    expect(
+      project({ matchingTargets: ['node', 'vite'], targetId: 'node' }, [
+        'node',
+        'vite',
+      ]).targetSource,
+    ).toBe('pick');
+  });
+
+  it('clamps the telemetry copies of LLM output without touching the decision', () => {
+    const junk = Array.from({ length: 30 }, (_, i) => `junk-${i}`);
+    const p = project({
+      matchingTargets: [...junk, 42, 'node'],
+      evidence: 'x'.repeat(500),
+    });
+    // The valid id sits past the telemetry cap yet still decides targetId.
+    expect(p.targetId).toBe('node');
+    expect(p.matchingTargets).toHaveLength(20);
+    expect(p.evidence).toHaveLength(200);
+  });
 });
 
 describe('resolveProjectDir', () => {
